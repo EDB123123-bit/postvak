@@ -1,0 +1,17 @@
+.build/
+build/
+*.xcodeproj
+.DS_Store
+.swiftpm/
+__pycache__/
+
+# Never commit credentials or local data
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.p12
+*.pem
+*.key
+client_secret*.json
+.claude/settings.local.json

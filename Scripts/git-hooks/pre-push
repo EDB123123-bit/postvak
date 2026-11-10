@@ -1,0 +1,94 @@
+#!/bin/zsh
+# Refuses any push that could carry private data out of this repository. Installed with:
+#   git config core.hooksPath Scripts/git-hooks
+# Run by hand on a branch or commit:  Scripts/git-hooks/pre-push check public
+#
+# Three gates, all of which must pass:
+#   1. Only the branch `public` may be pushed. Every other branch is private history and never leaves this Mac.
+#   2. No pushed commit (files, message, author) may contain a word from the private list at
+#      ~/.config/postvak/private-words.txt (kept outside the repository), or anything shaped like an API key.
+#   3. No pushed commit may contain a person or company from the live Postvak database: the addresses and
+#      names of people the user writes to or meets, their company domains, and the user's own accounts.
+#      Skipped with a notice when no database is present.
+set -u
+LIST="${POSTVAK_PRIVATE_WORDS:-$HOME/.config/postvak/private-words.txt}"
+DB="${POSTVAK_DATA_DIR:-$HOME/Library/Application Support/Postvak}/postvak.sqlite"
+SECRETS='sk-ant-[A-Za-z0-9_-]{10,}|GOCSPX-[A-Za-z0-9_-]{10,}|AIza[0-9A-Za-z_-]{30,}|[0-9]{8,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com|ya29\.[A-Za-z0-9_-]{20,}|1//0[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+# Domains of platforms and mail providers: writing to someone there says nothing private about the user.
+PLATFORMS='^(google\.com|googleapis\.com|apple\.com|github\.com|anthropic\.com|cal\.com|microsoft\.com|zoom\.us|calendar-notification\.google\.com)$'
+REPO=$(git rev-parse --show-toplevel)
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+bad=0
+fail() { echo "✗ $1" >&2; [[ -n "${2:-}" ]] && echo "$2" | sed 's/^/    /' >&2; bad=1; }
+
+# --- gate 2 input: the private word list -------------------------------------------------------------
+if [[ -f "$LIST" ]]; then
+  grep -v '^#' "$LIST" | grep -v '^[[:space:]]*$' > "$TMP/words"
+else
+  fail "no private word list at $LIST. Create it (one word or name per line) before pushing."
+fi
+
+# --- gate 3 input: people and companies from the live database -----------------------------------------
+live=0
+if [[ -f "$DB" ]] && command -v sqlite3 >/dev/null; then
+  live=1
+  q() { sqlite3 -readonly "$DB" "$1" 2>/dev/null }
+  # Generic mail providers, taken from the app's own list, so a client at gmail.com never flags gmail.com.
+  grep -oE '"[a-z0-9.-]+\.[a-z]+"' "$REPO/Sources/PostvakCore/Matching.swift" | tr -d '"' | sort -u > "$TMP/generic"
+  { q "select toLine||','||ccLine from message where labelIds like '%SENT%';" | grep -oiE '[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}'
+    q "select attendeesJSON from meeting;" | grep -oiE '"email":"[^"]+"' | cut -d'"' -f4
+    q "select id from account;"
+  } | tr 'A-Z' 'a-z' | sort -u > "$TMP/emails"
+  { sed 's/.*@//' "$TMP/emails"
+    q "select lower(key) from deal where key like '%.%' and key not like '%@%';"
+  } | sort -u | grep -vxF -f "$TMP/generic" | grep -vE "$PLATFORMS" > "$TMP/domains"
+  { q "select toLine||','||ccLine from message where labelIds like '%SENT%';" | tr ',' '\n' | grep -oE '^[^<]+<' | tr -d '<'
+    q "select attendeesJSON from meeting;" | grep -oiE '"name":"[^"]+"' | cut -d'"' -f4
+    q "select name from meeting_speaker;"
+    q "select displayName from account;"
+  } | sed 's/^[[:space:]"]*//; s/[[:space:]"]*$//' | tr 'A-Z' 'a-z' \
+    | grep -E "^[[:alpha:]][[:alpha:] .'-]+ [[:alpha:]][[:alpha:] .'-]+$" | sort -u > "$TMP/names"
+fi
+
+check_commit() {
+  local c=$1 hits
+  if [[ -s "$TMP/words" ]]; then
+    hits=$(git grep -n -i -F -f "$TMP/words" "$c" -- . 2>/dev/null | head -5)
+    [[ -n "$hits" ]] && fail "$c contains words from the private list:" "$hits"
+    hits=$(git log -1 --format='%an <%ae>%n%cn <%ce>%n%B' "$c" | grep -i -F -f "$TMP/words" | head -3)
+    [[ -n "$hits" ]] && fail "$c has private words in its message or author:" "$hits"
+  fi
+  hits=$(git grep -n -E "$SECRETS" "$c" -- . ':!Package.resolved' 2>/dev/null | head -5)
+  [[ -n "$hits" ]] && fail "$c contains something shaped like a secret:" "$hits"
+  if (( live )); then
+    hits=$(git grep -n -i -F -f "$TMP/emails" "$c" -- . 2>/dev/null | head -5)
+    [[ -n "$hits" ]] && fail "$c contains an address from your mail or meetings:" "$hits"
+    hits=$(git grep -n -i -w -F -f "$TMP/domains" "$c" -- . 2>/dev/null | head -5)
+    [[ -n "$hits" ]] && fail "$c contains a company domain from your mail, meetings or deals:" "$hits"
+    hits=$(git grep -n -i -w -F -f "$TMP/names" "$c" -- . 2>/dev/null | head -5)
+    [[ -n "$hits" ]] && fail "$c contains a person's name from your mail or meetings:" "$hits"
+  fi
+}
+
+if [[ "${1:-}" == "check" ]]; then
+  # By hand: every commit reachable from the given branch or commit.
+  for c in $(git rev-list "${2:-HEAD}"); do check_commit "$c"; done
+else
+  zero=0000000000000000000000000000000000000000
+  while read -r lref lsha rref rsha; do
+    [[ "$lsha" == "$zero" ]] && continue   # a deletion carries nothing
+    if [[ "$lref" != "refs/heads/public" ]]; then
+      fail "only the branch 'public' may be pushed; '$lref' is private history."
+      continue
+    fi
+    if [[ "$rsha" == "$zero" ]]; then range=$(git rev-list "$lsha" --not --remotes); else range=$(git rev-list "$rsha..$lsha"); fi
+    for c in ${(f)range}; do check_commit "$c"; done
+  done
+fi
+
+if (( bad )); then
+  echo "pre-push: refused. Nothing was pushed." >&2
+  exit 1
+fi
+(( live )) || echo "pre-push: note: no Postvak database here, so only the word list and secret patterns were checked." >&2
+echo "pre-push: no private data found." >&2
