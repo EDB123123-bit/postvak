@@ -174,7 +174,7 @@ struct DealsView: View {
                         }
                         shelvedSection
                         secondary
-                        Text("Stages, next steps and amounts are read by Claude from your mails and meeting notes, your own notes and your CRM. Right-click a deal to add a note. Company size comes from what was said, or from general knowledge where marked. The most important deals are ranked by stage, company size and the amount quoted.")
+                        Text("Stages, next steps, open points and amounts are read by Claude from your mails and meeting notes, your own notes and your CRM, within minutes of new mail or a meeting summary. Each card says when it was read and what the newest mail or meeting was. Right-click a deal to add a note. Company size comes from what was said, or from general knowledge where marked. The most important deals are ranked by stage, company size and the amount quoted.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(24)
@@ -643,6 +643,7 @@ struct DealCard: View {
                         if !deal.due.isEmpty { Text(deal.due).font(.caption).foregroundStyle(.secondary) }
                     }
                 }
+                OpenItems(deal: deal)
                 Divider()
                 HStack(spacing: 18) {
                     Text(deal.amount.isEmpty ? "No amount yet" : deal.amount).fontWeight(deal.amount.isEmpty ? .regular : .semibold)
@@ -650,6 +651,7 @@ struct DealCard: View {
                     Text(Self.lastContactText(last))
                 }
                 .font(.caption).foregroundStyle(.secondary)
+                ReadFrom(deal: deal, marks: marks)
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -659,6 +661,79 @@ struct DealCard: View {
         }
         .buttonStyle(.plain)
         .help(deal.latestThread == nil ? "" : "Open the latest mail with \(deal.company)")
+    }
+}
+
+/// What else is open in a deal besides its next step: what the user still owes and what the company still owes.
+/// Compact, for rows: the user's items in full, the company's as a count with the list on hover.
+struct OpenItems: View {
+    let deal: DealRecord
+    var compact = false
+    static let limit = 4
+
+    var body: some View {
+        let mine = deal.alsoOpen(.you), theirs = deal.alsoOpen(.them)
+        if !mine.isEmpty || !theirs.isEmpty {
+            VStack(alignment: .leading, spacing: compact ? 3 : 8) {
+                if !mine.isEmpty { group(deal.owner == .you ? "You also owe" : "You owe", mine) }
+                if !theirs.isEmpty {
+                    if compact {
+                        Text(theirs.count == 1 ? "They owe 1 thing" : "They owe \(theirs.count) things")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .help(theirs.map { "• " + Self.line($0) }.joined(separator: "\n"))
+                    } else {
+                        group(deal.owner == .them ? "They also owe" : "They owe", theirs)
+                    }
+                }
+            }
+        }
+    }
+
+    static func line(_ c: DealRecord.Commitment) -> String { c.due.isEmpty ? c.what : "\(c.what) · \(c.due)" }
+
+    private func group(_ title: String, _ list: [DealRecord.Commitment]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(Array(list.prefix(Self.limit).enumerated()), id: \.offset) { _, c in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("•").foregroundStyle(.secondary)
+                    Text(Self.line(c)).fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+                .help(c.made.isEmpty ? "" : "From: \(c.made)")
+            }
+            if list.count > Self.limit {
+                Text("and \(list.count - Self.limit) more").font(.caption).foregroundStyle(.secondary)
+                    .help(list.dropFirst(Self.limit).map { "• " + Self.line($0) }.joined(separator: "\n"))
+            }
+        }
+    }
+}
+
+/// What a deal's reading is based on: when Claude read it and the newest mail or meeting it saw.
+/// Says so when something newer arrived since, so a card that lags is visible as lagging.
+struct ReadFrom: View {
+    let deal: DealRecord
+    let marks: [Deals.Mark]
+
+    static func stamp(_ d: Date) -> String {
+        Calendar.current.isDateInToday(d) ? "today \(d.formatted(date: .omitted, time: .shortened))"
+            : d.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+    }
+
+    /// The first mail or meeting after the reading, if any.
+    static func unread(_ deal: DealRecord, marks: [Deals.Mark], now: Date = Date()) -> Date? {
+        marks.filter { $0.kind != .booked && $0.date <= now && $0.date > max(deal.analyzedAt, deal.latestAt ?? .distantPast) }.map(\.date).min()
+    }
+
+    var body: some View {
+        if let newer = Self.unread(deal, marks: marks) {
+            Label("New mail or a meeting on \(Self.stamp(newer)) is not in this reading yet", systemImage: "clock.arrow.circlepath")
+                .font(.caption2).foregroundStyle(.orange)
+        } else {
+            Text("Read \(Self.stamp(deal.analyzedAt))" + (deal.latestAt.map { " · newest mail or meeting then: \(Self.stamp($0))" } ?? ""))
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
     }
 }
 
@@ -701,6 +776,7 @@ struct DealRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(deal.nextStep).fixedSize(horizontal: false, vertical: true)
                     if !deal.due.isEmpty { Text(deal.due).font(.caption).foregroundStyle(.secondary) }
+                    if deal.stage.isOpen { OpenItems(deal: deal, compact: true).padding(.top, 2) }
                     if let note { NoteLine(text: note) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -763,6 +839,7 @@ struct OwedRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(deal.nextStep).fixedSize(horizontal: false, vertical: true)
                         if !deal.due.isEmpty { Text(deal.due).font(.caption).foregroundStyle(.secondary) }
+                        OpenItems(deal: deal, compact: true).padding(.top, 2)
                         if let note { NoteLine(text: note) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

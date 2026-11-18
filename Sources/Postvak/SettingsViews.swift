@@ -7,16 +7,22 @@ import PostvakAI
 import GRDB
 
 struct SettingsView: View {
+    /// The open tab, so another window can open Settings on a given one.
+    static let tabKey = "settings.tab"
+    static let outOfOfficeTab = "outOfOffice"
+    @AppStorage(SettingsView.tabKey) private var tab = "accounts"
+
     var body: some View {
-        TabView {
-            AccountsPane().tabItem { Label("Accounts", systemImage: "person.2") }
-            SignaturesPane().tabItem { Label("Signatures", systemImage: "signature") }
-            BookingPane().tabItem { Label("Booking", systemImage: "calendar.badge.plus") }
-            MeetingsPane().tabItem { Label("Meetings", systemImage: "waveform") }
-            AIPane().tabItem { Label("AI", systemImage: "sparkles") }
-            CRMPane().tabItem { Label("CRM", systemImage: "briefcase") }
-            MCPPane().tabItem { Label("Claude", systemImage: "link") }
-            GeneralPane().tabItem { Label("General", systemImage: "gearshape") }
+        TabView(selection: $tab) {
+            AccountsPane().tabItem { Label("Accounts", systemImage: "person.2") }.tag("accounts")
+            SignaturesPane().tabItem { Label("Signatures", systemImage: "signature") }.tag("signatures")
+            OutOfOfficePane().tabItem { Label("Out of Office", systemImage: "airplane") }.tag(Self.outOfOfficeTab)
+            BookingPane().tabItem { Label("Booking", systemImage: "calendar.badge.plus") }.tag("booking")
+            MeetingsPane().tabItem { Label("Meetings", systemImage: "waveform") }.tag("meetings")
+            AIPane().tabItem { Label("AI", systemImage: "sparkles") }.tag("ai")
+            CRMPane().tabItem { Label("CRM", systemImage: "briefcase") }.tag("crm")
+            MCPPane().tabItem { Label("Claude", systemImage: "link") }.tag("claude")
+            GeneralPane().tabItem { Label("General", systemImage: "gearshape") }.tag("general")
         }
         .frame(width: 620, height: 520)
     }
@@ -252,7 +258,7 @@ struct AIPane: View {
             Section("Deals") {
                 Toggle("Keep a deals overview from your mail and meetings", isOn: $deals)
                     .onChange(of: deals) { _, v in try? model.engine.db.setSetting("ai.deals", v ? "1" : "0") }
-                Text("Every six hours, sends the latest mails and meeting notes with your 60 busiest companies to Anthropic, but only for companies with something new. Claude returns each deal's stage, next step and quoted amount.").font(.caption).foregroundStyle(.secondary)
+                Text("Within minutes of new mail, a meeting or a meeting summary, sends the latest mails (the newest three in full, with attachment names) and meeting notes with that company to Anthropic. Only your 60 busiest companies, and only the ones with something new. Claude returns each deal's stage, next step, open points and quoted amount.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Follow-up review") {
                 Picker("Draft follow-ups", selection: $followUps) {

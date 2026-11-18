@@ -788,6 +788,36 @@ import AppKit
         XCTAssertTrue(RichTextHTML.html(from: NSAttributedString(string: "a\n\nb\n", attributes: f)).contains(">a<br><br>b<br></div>"))
     }
 
+    @Test func testMentionsInTheText() {
+        func q(_ s: String) -> String? { Mentions.query(in: s, cursor: (s as NSString).length)?.text }
+        XCTAssertEqual(q("Hoi @"), "")
+        XCTAssertEqual(q("@An"), "An", "At the very start")
+        XCTAssertEqual(q("Hoi (@An"), "An")
+        XCTAssertEqual(q("Hoi @Anna V"), "Anna V", "First and last name")
+        XCTAssertNil(q("Hoi @Anna Vermeulen "), "A second space ends it")
+        XCTAssertNil(q("Mail anna@zonnehoek.be"), "An address typed out is not a tag")
+        XCTAssertNil(q("Hoi @Anna\nDank"), "A new line ends it")
+        XCTAssertNil(q("Hoi @ Anna"))
+        XCTAssertEqual(Mentions.query(in: "Hoi @Anna, ok", cursor: 9)?.range, NSRange(location: 4, length: 5))
+
+        let onMail = ["Anna Vermeulen <anna@zonnehoek.be>", "piet@brightly.example.com"]
+        XCTAssertEqual(Mentions.suggestions(typed: "", onMail: onMail, others: [], own: []), onMail, "Just @ lists the people on the mail")
+        XCTAssertEqual(Mentions.suggestions(typed: "ver", onMail: onMail,
+                                            others: ["anna@zonnehoek.be", "Jan Verbeek <jan@panelwerk.example.com>", "me@example.com"],
+                                            own: ["me@example.com"]),
+                       ["Anna Vermeulen <anna@zonnehoek.be>", "Jan Verbeek <jan@panelwerk.example.com>"],
+                       "People on the mail first, each once, never yourself")
+        XCTAssertTrue(Mentions.matches("Zoë Peeters <zoe@example.com>", "zoe"), "Accents don't matter")
+        XCTAssertEqual(Mentions.label(for: "Anna Vermeulen <anna@zonnehoek.be>"), "@Anna Vermeulen")
+        XCTAssertEqual(Mentions.label(for: "piet@brightly.example.com"), "@piet@brightly.example.com")
+
+        XCTAssertEqual(Mentions.to(adding: "Jan Verbeek <jan@panelwerk.example.com>", to: "anna@zonnehoek.be", cc: "", bcc: ""),
+                       "anna@zonnehoek.be, Jan Verbeek <jan@panelwerk.example.com>")
+        XCTAssertEqual(Mentions.to(adding: "Jan <jan@panelwerk.example.com>", to: "", cc: "", bcc: ""), "Jan <jan@panelwerk.example.com>")
+        XCTAssertNil(Mentions.to(adding: "Anna <ANNA@zonnehoek.be>", to: "", cc: "Anna Vermeulen <anna@zonnehoek.be>", bcc: ""),
+                     "Already on the mail in Cc: left where they are")
+    }
+
     @Test func testListLinesToggleAndContinue() {
         let typing: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14)]
         func toggled(_ kind: RichTextList.Kind, _ s: String) -> String {

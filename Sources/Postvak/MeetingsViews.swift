@@ -166,6 +166,9 @@ struct MeetingDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if let m = meeting { header(m) }
+                    MeetingNotesEditor(meetingId: meetingId, summaryWrittenAt: summary?.createdAt,
+                                       canSummarize: !segments.isEmpty && meeting?.status == .ready)
+                        .id(meetingId)   // a fresh editor per meeting; leaving one saves what was typed
                     summarySection
                     relatedMailSection
                 }
@@ -597,6 +600,87 @@ struct MeetingDetail: View {
         if speaker == "Me" { return .accentColor }
         let palette: [Color] = [.green, .orange, .purple, .pink, .teal, .brown]
         return palette[abs(speaker.unicodeScalars.reduce(0) { $0 + Int($1.value) }) % palette.count]
+    }
+}
+
+/// The user's own notes on a meeting, saved as they type. Claude reads them as fact when it writes the summary and
+/// the follow-up mail; notes typed during a recording are in the summary written after it.
+struct MeetingNotesEditor: View {
+    @EnvironmentObject var model: AppModel
+    let meetingId: String
+    let summaryWrittenAt: Date?
+    let canSummarize: Bool
+    @State private var text = ""
+    @State private var saved = ""
+    @State private var loaded = false
+    /// When the notes last changed in this view, to offer writing the summary again.
+    @State private var changedAt: Date?
+    @State private var rewriting = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("My Notes").font(.headline)
+                Spacer()
+                if canSummarize, summaryWrittenAt != nil, let c = changedAt, c > (summaryWrittenAt ?? .distantPast), text == saved {
+                    Button(rewriting ? "Writing…" : "Update Summary With Notes") { rewrite() }
+                        .buttonStyle(.link).font(.caption).disabled(rewriting)
+                        .help("Write the summary again, with your notes")
+                }
+            }
+            TextEditor(text: $text)
+                .font(.body)
+                .focused($focused)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .frame(minHeight: 70, maxHeight: 260)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topLeading) {
+                    if text.isEmpty && !focused {
+                        Text("Type what matters to you: points, names, figures, things to follow up. Claude uses them in the summary and the follow-up email.")
+                            .foregroundStyle(.tertiary).padding(.horizontal, 11).padding(.vertical, 6).allowsHitTesting(false)
+                    }
+                }
+                .disabled(!loaded)
+        }
+        .task {
+            let n = (try? await model.engine.meetings.note(meetingId: meetingId)) ?? ""
+            text = n; saved = n; loaded = true
+        }
+        .task(id: text) {
+            // Saved a moment after the last key press.
+            guard loaded, text != saved else { return }
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            await save()
+        }
+        .onDisappear { if loaded, text != saved { let id = meetingId, t = text; Task { try? await model.engine.meetings.setNote(meetingId: id, text: t) } } }
+    }
+
+    private func save() async {
+        let t = text
+        do {
+            try await model.engine.meetings.setNote(meetingId: meetingId, text: t)
+            saved = t; changedAt = Date()
+        } catch {
+            model.logFailure("Saving meeting notes", error)
+            model.toast("Your notes couldn't be saved: \(error.localizedDescription)", kind: .error, seconds: 10)
+        }
+    }
+
+    private func rewrite() {
+        let id = meetingId
+        rewriting = true
+        Task {
+            do { try await model.summarizer.summarize(meetingId: id); changedAt = nil }
+            catch {
+                model.logFailure("Rewriting the summary", error)
+                model.toast("The summary couldn't be rewritten: \(error.localizedDescription)", kind: .error, seconds: 10)
+            }
+            rewriting = false
+        }
     }
 }
 

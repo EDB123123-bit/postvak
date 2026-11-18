@@ -733,3 +733,47 @@ enum MeetingFixture {
         XCTAssertFalse(try await e.meetings.get(m.id)!.0.detailedSummary)
     }
 }
+
+@Suite(.serialized) struct MeetingNotesTests {
+    @Test func testNotesAreKeptSearchedAndGoneWithTheMeeting() async throws {
+        let e = try makeEngine()
+        let m = try await MeetingFixture.meeting(e, guests: [("jan@acme.be", "Jan Peeters")], labels: ["Me", "Others"],
+                                                 text: ["De pilot kost 4000 euro per maand.", "Dat is te duur voor ons."])
+        XCTAssertEqual(try await e.meetings.note(meetingId: m.id), "")
+        try await e.meetings.setNote(meetingId: m.id, text: "Jan wil korting op het jaarcontract")
+        // A copy of the meeting saved by the recorder or transcriber must not touch the notes.
+        var copy = try await e.meetings.get(m.id)!.0
+        copy.title = "Pilot Acme"
+        try await e.meetings.save(copy)
+        XCTAssertEqual(try await e.meetings.note(meetingId: m.id), "Jan wil korting op het jaarcontract")
+        XCTAssertEqual(try await e.meetings.searchEverywhere("jaarcontract").map(\.kind), [.notes])
+        try await e.meetings.setNote(meetingId: m.id, text: "  \n")
+        XCTAssertEqual(try await e.meetings.note(meetingId: m.id), "", "Blank notes are removed")
+        try await e.meetings.setNote(meetingId: m.id, text: "Bellen vrijdag")
+        try await e.meetings.delete(m.id)
+        XCTAssertEqual(try await e.db.pool.read { try MeetingNoteRecord.fetchCount($0) }, 0)
+        try await e.meetings.setNote(meetingId: m.id, text: "Te laat")
+        XCTAssertEqual(try await e.db.pool.read { try MeetingNoteRecord.fetchCount($0) }, 0, "No notes for a deleted meeting")
+    }
+
+    @Test func testSummaryAndFollowUpReadTheNotes() async throws {
+        let e = try makeEngine()
+        let m = try await MeetingFixture.meeting(e, guests: [("jan@acme.be", "Jan Peeters")], labels: ["Me", "Others"],
+                                                 text: ["De pilot kost 4000 euro per maand.", "Dat is te duur voor ons."])
+        try await e.meetings.setNote(meetingId: m.id, text: "Offerte Zonnehoek tegen maandag")
+        var bodies: [String] = []
+        MockServer.reset { c in
+            bodies.append(String(decoding: c.body, as: UTF8.self))
+            let reply = #"{"summary":"Pilot besproken.","decisions":[],"action_items":[],"open_questions":[],"speakers":[]}"#
+            return (200, ["content": [["type": "text", "text": reply]], "stop_reason": "end_turn"])
+        }
+        try await MeetingSummarizer(claude: ClaudeClient(session: MockServer.session) { "k" }, store: e.meetings).summarize(meetingId: m.id)
+        XCTAssertTrue(bodies.last?.contains("THE USER'S OWN NOTES") == true)
+        XCTAssertTrue(bodies.last?.contains("Offerte Zonnehoek tegen maandag") == true)
+        let p = MeetingFollowUpWriter.prompt(meeting: m, summary: nil, notes: "Offerte Zonnehoek tegen maandag", me: nil,
+                                             recipients: ["jan@acme.be"], lastInThread: nil, samples: [])
+        XCTAssertTrue(p.contains("THE USER'S OWN NOTES\nOfferte Zonnehoek tegen maandag"))
+        XCTAssertFalse(MeetingFollowUpWriter.prompt(meeting: m, summary: nil, me: nil, recipients: ["jan@acme.be"], lastInThread: nil, samples: [])
+            .contains("OWN NOTES"))
+    }
+}

@@ -94,6 +94,22 @@ public final class MeetingStore: Sendable {
 
     public func save(_ m: MeetingRecord) async throws { try await db.pool.write { try m.save($0) } }
 
+    /// The user's own notes on a meeting, empty when there are none.
+    public func note(meetingId: String) async throws -> String {
+        try await db.pool.read { try MeetingNoteRecord.fetchOne($0, key: meetingId)?.text } ?? ""
+    }
+
+    /// Saves the user's notes; blank text removes them. Does nothing when the meeting no longer exists.
+    public func setNote(meetingId: String, text: String) async throws {
+        try await db.pool.write { db in
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                _ = try MeetingNoteRecord.deleteOne(db, key: meetingId)
+            } else if try MeetingRecord.exists(db, key: meetingId) {
+                try MeetingNoteRecord(meetingId: meetingId, text: text).save(db)
+            }
+        }
+    }
+
     /// The title and guests the user gave a recording after stopping it, as "Name <address>" or bare addresses.
     /// The guest list becomes exactly what was given (the user stays); then the meeting is filed and its speakers
     /// named again with it.
@@ -327,7 +343,7 @@ public final class MeetingStore: Sendable {
 
 /// One place in a meeting where search words were found.
 public struct MeetingSearchHit: Sendable {
-    public enum Kind: String, Sendable { case transcript, summary, decision, actionItem = "action item", openQuestion = "open question", title }
+    public enum Kind: String, Sendable { case transcript, summary, decision, actionItem = "action item", openQuestion = "open question", title, notes = "your notes" }
     public let meetingId: String
     public let meetingTitle: String
     public let startedAt: Date
@@ -371,6 +387,8 @@ public extension MeetingStore {
             let meetings = try MeetingRecord.fetchAll(db, sql: "SELECT m.* FROM meeting m WHERE 1=1\(dateSQL)", arguments: StatementArguments(dateArgs))
             var summaries: [String: MeetingSummaryRecord] = [:]
             for s in try MeetingSummaryRecord.fetchAll(db) { summaries[s.meetingId] = s }
+            var notes: [String: String] = [:]
+            for n in try MeetingNoteRecord.fetchAll(db) { notes[n.meetingId] = n.text }
             for m in meetings {
                 let people = m.attendees.map { [$0.name, $0.email].compactMap { $0 }.joined(separator: " ") }.joined(separator: ", ")
                 var chunks: [(MeetingSearchHit.Kind, String)] = [(.title, people.isEmpty ? m.title : "\(m.title) (\(people))")]
@@ -382,6 +400,7 @@ public extension MeetingStore {
                     }
                     chunks += s.openQuestions.map { (.openQuestion, $0) }
                 }
+                if let n = notes[m.id] { chunks += Self.passages(n).map { (.notes, $0) } }
                 for (kind, t) in chunks {
                     let n = Self.matchCount(words, in: t)
                     if n > 0 {

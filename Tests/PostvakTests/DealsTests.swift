@@ -67,6 +67,9 @@ import GRDB
         XCTAssertTrue(Deals.isAutomaticSubject("Accepted: Demo Zonnehoek @ Tue"))
         XCTAssertTrue(Deals.isAutomaticSubject("Geaccepteerd: Onboarding"))
         XCTAssertFalse(Deals.isAutomaticSubject("Re: Offerte"))
+        XCTAssertTrue(Deals.isAutoReply("Out of office Re: Offerte"))
+        XCTAssertTrue(Deals.isAutoReply("Appointment booked: Demo (Jan) @ Wed 4 Nov"))
+        XCTAssertFalse(Deals.isAutoReply("Uitnodiging voor een demo"), "A mail the user wrote, whatever its subject")
         XCTAssertFalse(Deals.isRobot("info@nulstroom.be"), "Small companies write from info@")
         XCTAssertTrue(Deals.isRobot("noreply@shop.be"))
     }
@@ -173,8 +176,8 @@ import GRDB
         XCTAssertEqual(saved.last?.contacts, "Lea", "Invite guests count as people at the company")
         XCTAssertEqual(saved.last?.owner, .meeting)
 
-        let body = try JSONSerialization.jsonObject(with: MockServer.recorded("/v1/messages")[0].body) as! [String: Any]
-        let user = ((body["messages"] as? [[String: Any]])?.first?["content"] as? String) ?? ""
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 2, "One request per company")
+        let user = userPrompts().joined(separator: "\n")
         XCTAssertTrue(user.contains("offerte voor 40 panelen"), "Mail text goes to Claude")
         XCTAssertTrue(user.contains("The user wrote from:"), "The address the user wrote from hints at the venture")
         XCTAssertTrue(user.contains("People at this company: Jan <jan@acme.be>\n"), "Claude gets the people who really work there, never the user")
@@ -183,13 +186,157 @@ import GRDB
 
         // Nothing new: nothing is read again.
         XCTAssertEqual(try await analyzer.run(), 0)
-        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 1)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 2)
         // A forced run reads everything again.
         XCTAssertEqual(try await analyzer.run(force: true), 2)
-        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 2)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 4)
+        // Deals read by an older reader are all read once more.
+        try e.db.setSetting("deals.reader", "1")
+        XCTAssertEqual(try await analyzer.run(), 2)
+        XCTAssertEqual(try await analyzer.run(), 0)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 6)
         // Switched off in Settings: no reading at all.
         try e.db.setSetting("ai.deals", "0")
         XCTAssertEqual(try await analyzer.run(force: true), 0)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 6)
+    }
+
+    /// The text of every request to Claude so far, in the order they went out.
+    func userPrompts() -> [String] {
+        MockServer.recorded("/v1/messages").map { call in
+            let body = (try? JSONSerialization.jsonObject(with: call.body)) as? [String: Any]
+            return ((body?["messages"] as? [[String: Any]])?.first?["content"] as? String) ?? ""
+        }
+    }
+
+    func deal(_ key: String, owner: String, step: String, commitments: String = "[]") -> String {
+        """
+        {"deals":[{"key":"\(key)","is_deal":true,"venture":"SolarCo","company":"Acme","contacts":"Jan","stage":"proposal","risk":"","next_step":"\(step)","owner":"\(owner)","due":"","amount":"","amount_eur":0,"size":"unknown","size_source":"","commitments":\(commitments)}]}
+        """
+    }
+
+    /// Jan asks for a design and a region list. Ann answers with a long mail carrying the design, and promises the regions for Friday.
+    func exchange() async throws -> Engine {
+        let e = try makeEngine(accounts: ["ann@solarco.be"])
+        try await e.db.pool.write { try $0.execute(sql: "UPDATE account SET displayName = 'Ann Smith'") }
+        let long = "Dag Jan,\n\nZie bijlage voor het ontwerp.\n" + String(repeating: "Hier volgt nog wat uitleg over de kaart. ", count: 30)
+            + "\nOp de exacte steden kom ik ten laatste vrijdag terug.\nVoorschot: 4500 euro."
+        var old: [[String: Any]] = []
+        for i in 0..<4 {
+            old.append(gmailMessage(id: "o\(i)", thread: "t1", from: i % 2 == 0 ? "Jan <jan@acme.be>" : "Ann Smith <ann@solarco.be>",
+                                    to: i % 2 == 0 ? "ann@solarco.be" : "jan@acme.be", subject: "Kaart",
+                                    body: "Oud bericht \(i). " + String(repeating: "Achtergrond bij de campagne. ", count: 40) + "EINDE\(i)",
+                                    labels: i % 2 == 0 ? ["INBOX", "CATEGORY_PERSONAL"] : ["SENT"], hoursAgo: 200 - Double(i)))
+        }
+        try await store(e, "t1", old + [
+            gmailMessage(id: "m1", thread: "t1", from: "Jan <jan@acme.be>", to: "ann@solarco.be", subject: "Re: Kaart",
+                         body: "Dag Ann, stuur je nog even de bijlage? En welke steden?", labels: ["INBOX", "CATEGORY_PERSONAL"], hoursAgo: 30),
+            gmailMessage(id: "m2", thread: "t1", from: "Ann Smith <ann@solarco.be>", to: "jan@acme.be", subject: "Out of office Re: Kaart",
+                         body: "Ik ben met verlof.", labels: ["SENT"], hoursAgo: 29.9),
+            gmailMessage(id: "m3", thread: "t1", from: "Ann Smith <ann@solarco.be>", to: "jan@acme.be", subject: "Re: Kaart",
+                         body: long, labels: ["SENT"], hoursAgo: 5),
+        ])
+        try await e.db.pool.write { db in
+            try AttachmentRecord(accountId: "ann@solarco.be", messageId: "m3", partId: "1", attachmentId: "a1", filename: "Ontwerp kaart.pdf",
+                                 mimeType: "application/pdf", size: 10, contentId: nil, localPath: nil).insert(db)
+            try AttachmentRecord(accountId: "ann@solarco.be", messageId: "m3", partId: "2", attachmentId: "a2", filename: "logo.png",
+                                 mimeType: "image/png", size: 10, contentId: "cid1", localPath: nil).insert(db)
+        }
+        return e
+    }
+
+    @Test func testNewestMailsGoWholeWithAttachmentNames() async throws {
+        let e = try await exchange()
+        let deals = Deals(db: e.db)
+        let (identity, list) = try await deals.candidates()
+        let c = try #require(list.first { $0.key == "acme.be" })
+        let ev = try await deals.evidence(for: c, identity: identity)
+        XCTAssertEqual(ev.mails.count, 6, "The user's own out-of-office answer is no mail from the user")
+        let last = try #require(ev.mails.last)
+        XCTAssertTrue(last.text.contains("Voorschot: 4500 euro"), "The newest mails are not cut at 700 characters")
+        XCTAssertFalse(last.cut)
+        XCTAssertEqual(last.attachments, ["Ontwerp kaart.pdf"], "Files by name, without the pictures of a signature")
+        XCTAssertTrue(ev.mails[0].cut, "Older mails keep the short cut")
+        XCTAssertFalse(ev.mails[0].text.contains("EINDE0"))
+        XCTAssertTrue((ev.lastUserMail ?? .distantPast) > (ev.lastTheirMail ?? .distantFuture), "The user wrote last")
+        let prompt = DealAnalyzer.prompt([ev], ventures: [], ownDomains: ["solarco.be"], now: Date())
+        XCTAssertTrue(prompt.contains("Attachments: Ontwerp kaart.pdf\n"))
+        XCTAssertTrue(prompt.contains("(cut)"))
+        XCTAssertTrue(prompt.contains("Newest mail from the user:"))
+    }
+
+    @Test func testYouOweIsReadASecondTimeWhenTheUserWroteLast() async throws {
+        let e = try await exchange()
+        let first = deal("acme.be", owner: "you", step: "Send Jan the attachment he asked for")
+        let ledger = """
+        [{"actor":"you","ask":"Send Jan the design","made":"Jan, mail","settled_by":"the user's mail, with attachment Ontwerp kaart.pdf","status":"done","when_due":""},
+         {"actor":"you","ask":"Come back to Jan with the exact cities","made":"the user, mail","settled_by":"","status":"open","when_due":"Fri"},
+         {"actor":"you","ask":"Adapt the calculation tool","made":"meeting","settled_by":"","status":"open","when_due":""},
+         {"actor":"them","ask":"Pay the deposit of 4500 euro","made":"the user, mail","settled_by":"","status":"open","when_due":""}]
+        """
+        let second = deal("acme.be", owner: "you", step: "Come back to Jan with the exact cities by Friday", commitments: ledger)
+        MockServer.reset { c in
+            (200, self.claudeBody(String(decoding: c.body, as: UTF8.self).contains("CHECK BEFORE YOU ANSWER") ? second : first))
+        }
+        let deals = Deals(db: e.db)
+        let analyzer = DealAnalyzer(deals: deals, claude: ClaudeClient(session: MockServer.session) { "k" }, db: e.db)
+        XCTAssertEqual(try await analyzer.run(), 1)
+        let prompts = userPrompts()
+        XCTAssertEqual(prompts.count, 2, "The reading that says the user owes it is made twice")
+        XCTAssertFalse(prompts[0].contains("CHECK BEFORE YOU ANSWER"))
+        XCTAssertTrue(prompts[1].contains("A first reading said the user still owes this: \"Send Jan the attachment he asked for\""))
+        XCTAssertTrue(prompts[1].contains("is newer than anything the company wrote"))
+        let saved = try #require(try await deals.all().first)
+        XCTAssertEqual(saved.nextStep, "Come back to Jan with the exact cities by Friday", "The second reading stands")
+        XCTAssertEqual(saved.items.count, 4)
+        XCTAssertEqual(saved.items.filter(\.open).count, 3)
+        XCTAssertEqual(saved.alsoOpen(.you).map(\.what), ["Adapt the calculation tool"], "The next step itself is not listed twice")
+        XCTAssertEqual(saved.alsoOpen(.them).map(\.what), ["Pay the deposit of 4500 euro"])
+        XCTAssertNotNil(saved.latestAt)
+        // The request's keys go out sorted, so Claude settles the commitments before it names the next step.
+        let raw = String(decoding: MockServer.recorded("/v1/messages")[0].body, as: UTF8.self)
+        let props = try #require(raw.range(of: "\"properties\":{\"amount\""))
+        let tail = raw[props.upperBound...]
+        let ledgerAt = try #require(tail.range(of: "\"commitments\"")), stepAt = try #require(tail.range(of: "\"next_step\""))
+        XCTAssertTrue(ledgerAt.lowerBound < stepAt.lowerBound)
+
+        // A reading that says the company owes it is made once.
+        MockServer.reset { _ in (200, self.claudeBody(self.deal("acme.be", owner: "them", step: "Jan pays the deposit"))) }
+        XCTAssertEqual(try await analyzer.run(force: true), 1)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 1)
+    }
+
+    @Test func testAnAnswerWithoutTheCompanyIsAskedForOnceMore() async throws {
+        let e = try await exchange()
+        nonisolated(unsafe) var calls = 0
+        MockServer.reset { _ in
+            calls += 1
+            // First nothing at all, then the right company under a key written differently.
+            return (200, self.claudeBody(calls == 1 ? #"{"deals":[]}"# : self.deal("Acme.be ", owner: "them", step: "Jan pays the deposit")))
+        }
+        let deals = Deals(db: e.db)
+        let analyzer = DealAnalyzer(deals: deals, claude: ClaudeClient(session: MockServer.session) { "k" }, db: e.db)
+        XCTAssertEqual(try await analyzer.run(), 1)
         XCTAssertEqual(MockServer.recorded("/v1/messages").count, 2)
+        XCTAssertEqual(try await deals.all().map(\.key), ["acme.be"], "Stored under the key that was asked about")
+    }
+
+    @Test func testAMeetingSummaryThatLandsLaterMakesTheDealStale() async throws {
+        let e = try await exchange()
+        MockServer.reset { _ in (200, self.claudeBody(self.deal("acme.be", owner: "them", step: "Jan pays the deposit"))) }
+        let analyzer = DealAnalyzer(deals: Deals(db: e.db), claude: ClaudeClient(session: MockServer.session) { "k" }, db: e.db)
+        let t0 = Date()
+        XCTAssertEqual(try await analyzer.run(now: t0), 1)
+        XCTAssertEqual(try await analyzer.run(now: t0.addingTimeInterval(60)), 0)
+        var m = MeetingRecord(title: "Demo Acme", startedAt: t0.addingTimeInterval(-7200), endedAt: t0.addingTimeInterval(-3600), status: .ready)
+        m.attendeesJSON = #"[{"email":"ann@solarco.be","isSelf":true},{"email":"jan@acme.be"}]"#
+        try await e.meetings.save(m)
+        var s = MeetingSummaryRecord(meetingId: m.id, summary: "Demo gehouden.", decisions: [], actionItems: [ActionItem(task: "Tool aanpassen", owner: "Ann")],
+                                     openQuestions: [], model: "test")
+        s.createdAt = t0.addingTimeInterval(120)
+        try await e.meetings.saveSummary(s)
+        XCTAssertEqual(try await analyzer.run(now: t0.addingTimeInterval(300)), 1, "The summary is new material, though no mail arrived")
+        XCTAssertTrue(userPrompts().last?.contains("Tool aanpassen") ?? false)
+        XCTAssertEqual(try await analyzer.run(now: t0.addingTimeInterval(600)), 0)
     }
 }

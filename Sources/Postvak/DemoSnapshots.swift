@@ -114,6 +114,23 @@ enum DemoSnapshots {
                     tv.insertText("Datum", replacementRange: tv.selectedRange())
                     if let d = composerWindows().first?.draft { print("formatted html: \(d.state.composeInput().html ?? "")") }
                 }),
+                ("composer-mention-at", {
+                    guard let tv = composerWindows().first.flatMap({ textView(in: $0.contentView) }) else { print("no composer text"); return }
+                    tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+                    tv.insertText("\nVraag het aan @", replacementRange: tv.selectedRange())
+                }),
+                ("composer-mention-typing", {
+                    guard let tv = composerWindows().first.flatMap({ textView(in: $0.contentView) }) else { print("no composer text"); return }
+                    tv.insertText("Ma", replacementRange: tv.selectedRange())
+                }),
+                ("composer-mention-tagged", {
+                    guard let w = composerWindows().first, let tv = textView(in: w.contentView) else { print("no composer text"); return }
+                    // Return, as the keyboard sends it.
+                    tv.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+                    tv.insertText("voor de prijs.", replacementRange: tv.selectedRange())
+                    print("to after tag: \(w.draft.state.to)")
+                    print("tagged html: \(w.draft.state.composeInput().html ?? "")")
+                }),
                 ("composer-check", {
                     guard let d = composerWindows().first?.draft else { print("no composer"); return }
                     d.state.body = ComposerState.body("Dag An,\n\nZie bijlage voor de nieuwe planning.")

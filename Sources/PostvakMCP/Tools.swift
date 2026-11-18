@@ -62,6 +62,14 @@ private func int(_ d: String) -> [String: Any] { ["type": "integer", "descriptio
 private func bool(_ d: String) -> [String: Any] { ["type": "boolean", "description": d] }
 private func strs(_ d: String) -> [String: Any] { ["type": "array", "items": ["type": "string"], "description": d] }
 
+private func outOfOfficeJSON(_ account: String, _ o: OutOfOffice) -> [String: Any] {
+    let day = Fmt.day()
+    return ["account": account, "enabled": o.enabled, "status": o.statusText(), "replying_now": o.isActive(),
+            "subject": o.subject, "message": o.message,
+            "first_day": o.start.map { day.string(from: $0) } ?? NSNull(), "last_day": o.lastDay().map { day.string(from: $0) } ?? NSNull(),
+            "contacts_only": o.contactsOnly, "domain_only": o.domainOnly]
+}
+
 private func threadJSON(_ t: MailThread) -> [String: Any] {
     [
         "account": t.accountId, "thread_id": t.threadId, "subject": t.subject, "snippet": t.snippet,
@@ -321,6 +329,42 @@ public enum PostvakTools {
                 try await e.mail.setSignature(accountId: acct, html: html)
                 return ["account": acct, "previous_signature_html": old, "signature_html": html]
             },
+            MCPTool(name: "get_out_of_office", description: "Read the out-of-office automatic reply (Gmail's vacation responder) of one account, or of every account when none is given.",
+                    properties: ["account": str("Account address. Leave out for all accounts.")]) { raw in
+                var accounts: [String]
+                if let one = Args(raw: raw).string("account") { accounts = [one] } else { accounts = try await e.mail.accounts().map(\.id) }
+                var out: [[String: Any]] = []
+                for acct in accounts { out.append(outOfOfficeJSON(acct, try await e.mail.outOfOffice(accountId: acct))) }
+                return out
+            },
+            MCPTool(name: "set_out_of_office", description: "Turn an account's out-of-office automatic reply on or off, or change it. Gmail sends the replies, once per sender every few days, even when the Mac is off. Arguments left out keep their current value. Show the user the exact text and dates and get their OK before turning it on.",
+                    properties: ["account": str("Account address."), "enabled": bool("true sends automatic replies, false stops them."),
+                                 "subject": str("Subject of the reply."), "message": str("The reply, plain text."),
+                                 "first_day": str("First day replies go out, YYYY-MM-DD. Empty string: from now."),
+                                 "last_day": str("Last day replies go out (included), YYYY-MM-DD. Empty string: until turned off."),
+                                 "contacts_only": bool("Only reply to people in the account's Google contacts."),
+                                 "domain_only": bool("Only reply to people at the account's own domain (Google Workspace only).")],
+                    required: ["account"]) { raw in
+                let a = Args(raw: raw)
+                let acct = try a.need("account")
+                let old = try await e.mail.outOfOffice(accountId: acct)
+                var o = old
+                if let v = a.bool("enabled") { o.enabled = v }
+                if let v = raw["subject"] as? String { o.subject = v }
+                if let v = raw["message"] as? String { o.message = v }
+                if let v = a.bool("contacts_only") { o.contactsOnly = v }
+                if let v = a.bool("domain_only") { o.domainOnly = v }
+                func day(_ k: String) throws -> Date?? {
+                    guard let s = raw[k] as? String else { return .none }
+                    if s.isEmpty { return .some(nil) }
+                    guard let d = Fmt.parse(s) else { throw ArgError(message: "\(k) must look like 2026-11-20") }
+                    return .some(d)
+                }
+                let first = try day("first_day") ?? o.start, last = try day("last_day") ?? o.lastDay()
+                o.setDays(first: first, last: last)
+                let saved = try await e.mail.setOutOfOffice(accountId: acct, o)
+                return ["previous": outOfOfficeJSON(acct, old), "now": outOfOfficeJSON(acct, saved)]
+            },
         ]
     }
 
@@ -407,12 +451,14 @@ public enum PostvakTools {
                 return try await e.meetings.list(from: try a.date("from"), to: try a.date("to"), text: a.string("text"), project: a.string("project"),
                                                  limit: a.int("limit") ?? 25).map(meetingJSON)
             },
-            MCPTool(name: "get_meeting", description: "Read a meeting: summary, decisions, action items with their transcript source, open questions, attendees, speakers, linked event, and email threads with the guests around its date.",
+            MCPTool(name: "get_meeting", description: "Read a meeting: the user's own notes, summary, decisions, action items with their transcript source, open questions, attendees, speakers, linked event, and email threads with the guests around its date.",
                     properties: ["meeting_id": str("Meeting id.")], required: ["meeting_id"]) { raw in
                 let id = try Args(raw: raw).need("meeting_id")
                 guard let (m, s) = try await e.meetings.get(id) else { throw MailError.notFound("meeting \(id)") }
                 var out = meetingJSON(m)
                 out["segment_count"] = try await e.meetings.segmentCount(meetingId: id)
+                let notes = try await e.meetings.note(meetingId: id)
+                out["user_notes"] = notes.isEmpty ? NSNull() : notes
                 out["related_threads"] = try await e.meetings.relatedThreads(meetingId: id).map {
                     ["account": $0.accountId, "thread_id": $0.threadId, "subject": $0.subject, "last_at": Fmt.string($0.lastAt),
                      "sent": $0.sent, "received": $0.received, "with_guests": $0.guestsInThread > 0] as [String: Any]

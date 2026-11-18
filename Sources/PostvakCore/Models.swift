@@ -284,6 +284,18 @@ public struct MeetingRecord: PersistableModel, Identifiable, Hashable {
     }
 }
 
+/// What the user wrote about a meeting, during or after it. Kept apart from the meeting row so the recording and
+/// transcription steps, which save their own copy of the meeting, never wipe it.
+public struct MeetingNoteRecord: PersistableModel, Hashable {
+    public static let databaseTableName = "meeting_note"
+    public var meetingId: String
+    public var text: String
+    public var updatedAt: Date
+    public init(meetingId: String, text: String, updatedAt: Date = Date()) {
+        self.meetingId = meetingId; self.text = text; self.updatedAt = updatedAt
+    }
+}
+
 public struct TranscriptSegmentRecord: PersistableModel, Identifiable, Hashable {
     public static let databaseTableName = "transcript_segment"
     public var id: String

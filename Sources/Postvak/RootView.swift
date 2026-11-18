@@ -342,6 +342,7 @@ struct BannerStack: View {
                 banner(err, color: .orange) { EmptyView() }
             }
             DraftsBanner(review: model.draftReview)
+            OutOfOfficeBanner(status: model.outOfOffice)
             // The Scheduled page lists these itself, with the same choices.
             ForEach(model.destination == .scheduled ? [] : model.overdueOutbox) { row in
                 banner(Self.text(row), color: .orange) {

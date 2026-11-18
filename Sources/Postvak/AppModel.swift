@@ -109,6 +109,7 @@ final class AppModel: NSObject, ObservableObject {
     lazy var sendCheck = SendCheck(claude: claude)
     lazy var followUpWriter = FollowUpWriter(claude: claude)
     lazy var draftReview = DraftReview(model: self)
+    lazy var outOfOffice = OutOfOfficeStatus(model: self)
     lazy var meetingFollowUpWriter = MeetingFollowUpWriter(claude: claude)
     lazy var prepBriefs = PrepBriefs(db: engine.db)
     lazy var prepWriter = PrepBriefWriter(claude: claude)
@@ -188,7 +189,7 @@ final class AppModel: NSObject, ObservableObject {
             _ = try? await classifier.run()
             // Drafts handled elsewhere leave the review list, and the follow-up review runs when its morning came.
             await self?.draftReview.afterSync()
-            // Deals are read again at most every six hours, and then only the companies with new mail or meetings.
+            // Deals are checked every few minutes, and only the companies with new mail, a meeting or a summary are read again.
             if dealAnalyzer.isDue() { _ = try? await dealAnalyzer.run() }
         }
         engine.onFollowUpsDue = { [weak self] fell in await self?.draftNudges(fell) }
@@ -197,6 +198,7 @@ final class AppModel: NSObject, ObservableObject {
         }
         observe()
         draftReview.start()
+        outOfOffice.start()
         if !demoMode {
             engine.start()
             Task {
@@ -553,7 +555,8 @@ final class AppModel: NSObject, ObservableObject {
         let names = SpeakerNames.displayNames(speakers)
         // Names Postvak suggested but nobody confirmed still help tell the voices apart.
         let hints = speakers.filter { $0.source == .suggested }.reduce(into: [String: String]()) { $0[$1.label] = $1.name }
-        let out = try await meetingFollowUpWriter.write(meeting: m, summary: summary, invite: invite, segments: segments, names: names, hints: hints,
+        let notes = try await store.note(meetingId: m.id)
+        let out = try await meetingFollowUpWriter.write(meeting: m, summary: summary, invite: invite, segments: segments, notes: notes, names: names, hints: hints,
                                                         me: me, recipients: people.to, cc: people.cc, lastInThread: last, samples: samples)
         var subject = out.subject
         if let last { subject = last.subject.lowercased().hasPrefix("re:") ? last.subject : "Re: \(last.subject)" }

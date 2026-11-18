@@ -92,6 +92,38 @@ case "deals":
                      c.mailsIn, c.mailsOut, c.meetingsHeld, c.meetingsBooked))
     }
     print("\(list.count) companies in all")
+case "deal-read":
+    // postvak-dev deal-read <company key>… [--model <id>] [--effort <level>] [--prompt]: reads those deals the way the app
+    // would and prints the working; saves nothing. Run it on a copy of the data. The Claude key comes from
+    // ANTHROPIC_API_KEY, or else from Postvak's own Keychain entry (macOS asks first), and is never printed.
+    func option(_ name: String) -> String? { args.firstIndex(of: name).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+    let keys = args.dropFirst().filter { !$0.hasPrefix("--") && $0 != option("--model") && $0 != option("--effort") }
+    let apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? KeychainSecretStore().get(SecretKey.anthropicKey) ?? ""
+    guard !apiKey.isEmpty else { print("No Claude key: set ANTHROPIC_API_KEY or allow the Keychain request."); exit(1) }
+    let usage = ApiUsage(db: engine.db)
+    let claude = ClaudeClient(session: .shared, key: { apiKey }) { feature, model, u in Task { try? await usage.record(feature: feature, model: model, usage: u) } }
+    let analyzer = DealAnalyzer(deals: Deals(db: engine.db), claude: claude, db: engine.db,
+                                model: option("--model") ?? ClaudeClient.model, effort: option("--effort") ?? "low")
+    func show(_ r: DealRecord) {
+        print("  stage \(r.stage.rawValue) · owner \(r.owner.rawValue) · due \(r.due.isEmpty ? "-" : r.due)")
+        print("  next: \(r.nextStep)")
+        print("  amount: \(r.amount.isEmpty ? "-" : r.amount) (\(Int(r.amountEUR)) EUR)")
+        for c in r.items { print("   [\(c.open ? "open" : "done")] \(c.actor.rawValue): \(c.what)\(c.due.isEmpty ? "" : " · " + c.due)\(c.settledBy.isEmpty ? "" : "  <= " + c.settledBy)") }
+    }
+    for r in try await analyzer.preview(keys: Array(keys)) {
+        if args.contains("--prompt") { print(r.prompt) }
+        for d in r.final {
+            print("\n===== \(d.key) (\(d.company))")
+            if let why = r.checks[d.key], let f = r.first.first(where: { $0.key == d.key }) {
+                print("FIRST READING"); show(f)
+                print("SECOND LOOK because: \(why.prefix(160))…")
+                print("FINAL"); show(d)
+            } else { print("READING (no second look needed)"); show(d) }
+        }
+    }
+    try await Task.sleep(for: .seconds(1))
+    let cost = try await engine.db.pool.read { try Int.fetchOne($0, sql: "SELECT sum(costMicros) FROM api_usage WHERE feature = 'Deals' AND day = date('now')") } ?? 0
+    print("\nDeals reading cost today in this copy, old runs included: \(cost) (in the unit of api_usage.costMicros)")
 case "follow-up":
     // postvak-dev follow-up <meetingId>: writes a meeting's follow-up as a new mail and prints it; saves nothing.
     // Reads the Claude key from ANTHROPIC_API_KEY.
@@ -112,5 +144,5 @@ case "follow-up":
     print("Subject:", out.subject, "\n\n" + out.text)
     print("\n(\(out.text.split(whereSeparator: \.isWhitespace).count) words)")
 default:
-    print("Commands: seed, transcribe, pipeline, record, serve, link-imports, deals, follow-up")
+    print("Commands: seed, transcribe, pipeline, record, serve, link-imports, deals, deal-read, follow-up")
 }

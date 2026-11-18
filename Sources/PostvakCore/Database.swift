@@ -336,6 +336,21 @@ public final class AppDatabase: @unchecked Sendable {
         m.registerMigration("v12-detailed-summary") { db in
             try db.alter(table: "meeting") { t in t.add(column: "detailedSummary", .boolean).notNull().defaults(to: false) }
         }
+        // The user's own notes on a meeting.
+        m.registerMigration("v13-meeting-notes") { db in
+            try db.create(table: "meeting_note") { t in
+                t.primaryKey("meetingId", .text).references("meeting", onDelete: .cascade)
+                t.column("text", .text).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+        }
+        // Everything asked or promised in a deal, and the newest mail or meeting the reading saw.
+        m.registerMigration("v14-deal-items") { db in
+            try db.alter(table: "deal") { t in
+                t.add(column: "itemsJSON", .text).notNull().defaults(to: "[]")
+                t.add(column: "latestAt", .datetime)
+            }
+        }
         return m
     }
 

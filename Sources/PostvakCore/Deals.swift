@@ -25,6 +25,24 @@ public struct DealRecord: PersistableModel, Identifiable, Hashable {
     }
     public enum Owner: String, Codable, Sendable { case you, them, meeting, none }
 
+    /// Something one side asked for or promised, and whether a later mail or meeting settled it.
+    public struct Commitment: Codable, Hashable, Sendable {
+        public enum Actor: String, Codable, Sendable { case you, them }
+        public var what: String
+        /// Who has to do it.
+        public var actor: Actor
+        /// Who asked or promised it and when, like "Anna, mail of Mon 16 Nov".
+        public var made: String
+        public var due: String
+        public var open: Bool
+        /// The later mail or meeting that settled it. Empty while open.
+        public var settledBy: String
+
+        public init(what: String, actor: Actor, made: String = "", due: String = "", open: Bool = true, settledBy: String = "") {
+            self.what = what; self.actor = actor; self.made = made; self.due = due; self.open = open; self.settledBy = settledBy
+        }
+    }
+
     public var key: String
     /// False for suppliers, banks, events, friends and the like: kept so they are not read again until something changes.
     public var isDeal: Bool
@@ -48,16 +66,43 @@ public struct DealRecord: PersistableModel, Identifiable, Hashable {
     /// Changes whenever new mail or a meeting arrives, which is when the deal is read again.
     public var activityKey: String
     public var analyzedAt: Date
+    /// Everything asked or promised on either side, as JSON. The open ones are what the deal is waiting on.
+    public var itemsJSON: String
+    /// The newest mail or meeting this reading saw.
+    public var latestAt: Date?
 
     public var id: String { key }
 
+    public var items: [Commitment] { (try? JSONDecoder().decode([Commitment].self, from: Data(itemsJSON.utf8))) ?? [] }
+
+    /// What is still open besides the next step itself, for one side.
+    public func alsoOpen(_ actor: Commitment.Actor) -> [Commitment] {
+        var list = items.filter { $0.open && $0.actor == actor }
+        let mine: Commitment.Actor? = owner == .you ? .you : owner == .them ? .them : nil
+        guard actor == mine, !list.isEmpty else { return list }
+        // The next step is one of these in other words: leave out the one that shares most of its words.
+        let step = Self.words(nextStep)
+        let scored = list.enumerated().map { i, c -> (Int, Double) in
+            let w = Self.words(c.what)
+            let union = step.union(w).count
+            return (i, union == 0 ? 0 : Double(step.intersection(w).count) / Double(union))
+        }
+        if let best = scored.max(by: { $0.1 < $1.1 }), best.1 >= 0.3 || list.count == 1 { list.remove(at: best.0) }
+        return list
+    }
+
+    static func words(_ s: String) -> Set<String> {
+        Set(s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 4 })
+    }
+
     public init(key: String, isDeal: Bool, venture: String, company: String, contacts: String, stage: Stage, risk: String,
                 nextStep: String, owner: Owner, due: String, amount: String, amountEUR: Double, size: String, sizeSource: String,
-                latestThread: String?, activityKey: String, analyzedAt: Date) {
+                latestThread: String?, activityKey: String, analyzedAt: Date, items: [Commitment] = [], latestAt: Date? = nil) {
         self.key = key; self.isDeal = isDeal; self.venture = venture; self.company = company; self.contacts = contacts
         self.stage = stage; self.risk = risk; self.nextStep = nextStep; self.owner = owner; self.due = due; self.amount = amount
         self.amountEUR = amountEUR; self.size = size; self.sizeSource = sizeSource; self.latestThread = latestThread
-        self.activityKey = activityKey; self.analyzedAt = analyzedAt
+        self.activityKey = activityKey; self.analyzedAt = analyzedAt; self.latestAt = latestAt
+        itemsJSON = String(decoding: (try? JSONEncoder().encode(items)) ?? Data("[]".utf8), as: UTF8.self)
     }
 
     /// How much this deal matters: how far along it is, how big the company is and how much was quoted.
@@ -102,6 +147,8 @@ public final class Deals: Sendable {
         public let meetingsBooked: Int
         public let latest: Date?
         public let latestThread: String?
+        /// When the newest summary of a meeting with them was written. It lands after the meeting, so it is new material by itself.
+        public var summaryAt: Date? = nil
         public var score: Int { mailsIn + mailsOut + 4 * meetingsHeld + 5 * meetingsBooked }
         public var activityKey: String {
             "\(mailsIn)-\(mailsOut)-\(meetingsHeld)-\(meetingsBooked)-\(Int(latest?.timeIntervalSince1970 ?? 0))"
@@ -109,7 +156,13 @@ public final class Deals: Sendable {
     }
 
     public struct Evidence: Sendable {
-        public struct Mail: Sendable { public let fromUser: Bool; public let from: String; public let date: Date; public let subject: String; public let text: String }
+        public struct Mail: Sendable {
+            public let fromUser: Bool; public let from: String; public let date: Date; public let subject: String; public let text: String
+            /// The files the mail carried, by name. Pictures inside a signature are left out.
+            public var attachments: [String] = []
+            /// The text was cut, so there is more Claude did not see.
+            public var cut = false
+        }
         public struct Meeting: Sendable {
             public let title: String; public let date: Date; public let summary: String
             public let actionItems: [ActionItem]; public let decisions: [String]
@@ -125,7 +178,15 @@ public final class Deals: Sendable {
         public let meetings: [Meeting]
         public let pastEvents: [Event]
         public let upcoming: [Event]
+
+        public var lastUserMail: Date? { mails.filter(\.fromUser).map(\.date).max() }
+        public var lastTheirMail: Date? { mails.filter { !$0.fromUser }.map(\.date).max() }
     }
+
+    /// The newest mails go to Claude whole, up to this many characters each; older ones are background and get the short cut.
+    public static let fullMails = 3
+    public static let fullLength = 4000
+    public static let shortLength = 700
 
     public enum MarkKind: String, Sendable { case mailIn, mailOut, meeting, booked }
     public struct Mark: Sendable, Hashable { public let date: Date; public let kind: MarkKind }
@@ -191,6 +252,13 @@ public final class Deals: Sendable {
         return ["noreply", "no-reply", "donotreply", "do-not-reply", "notification", "mailer-daemon", "bounce", "calendar-"].contains { local.contains($0) }
     }
 
+    static let autoReplySubject = try! NSRegularExpression(pattern: #"^(automatic reply|automatisch antwoord|réponse automatique|out of office|afwezig|appointment booked|afspraak geboekt|rendez-vous réservé)\b"#, options: [.caseInsensitive])
+
+    /// The user's own out-of-office answer or a booking notice from their calendar: sent from their account, yet they did not write it.
+    static func isAutoReply(_ s: String) -> Bool {
+        autoReplySubject.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+    }
+
     static func isAutomaticSubject(_ s: String) -> Bool {
         automaticSubject.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
     }
@@ -246,19 +314,39 @@ public final class Deals: Sendable {
                     touch(k, date, thread: thread)
                 }
             }
+            var keysOfEvent: [String: Set<String>] = [:]
             for (e, keys) in try Self.meetingsWithOthers(db, from: since, to: now.addingTimeInterval(90 * 86400), identity: identity) {
+                keysOfEvent[e.eventId] = keys
                 for k in keys {
                     if e.startAt <= now { tally[k, default: Tally()].held += 1; touch(k, e.startAt, thread: nil) }
                     else { tally[k, default: Tally()].booked += 1 }
                 }
             }
+            // A summary is written minutes after the meeting, or again later: the deal is read again once it is there.
+            var summaryAt: [String: Date] = [:]
+            for r in try Row.fetchAll(db, sql: """
+                SELECT m.attendeesJSON, m.eventId, s.createdAt, s.editedAt FROM meeting m JOIN meeting_summary s ON s.meetingId = m.id WHERE m.startedAt >= ?
+                """, arguments: [since]) {
+                let created: Date = r["createdAt"], edited: Date? = r["editedAt"]
+                let at = max(created, edited ?? created)
+                var keys = (r["eventId"] as String?).flatMap { keysOfEvent[$0] } ?? []
+                for e in Self.emails(in: r["attendeesJSON"]) where !identity.isMe(e) && !identity.isInternal(e) { keys.insert(Self.key(for: e)) }
+                for k in keys where summaryAt[k].map({ at > $0 }) ?? true { summaryAt[k] = at }
+            }
             let list = tally.compactMap { k, t -> Candidate? in
                 guard (t.mailsIn > 0 && t.mailsOut > 0) || t.held > 0 || t.booked > 0 else { return nil }
                 return Candidate(key: k, mailsIn: t.mailsIn, mailsOut: t.mailsOut, meetingsHeld: t.held, meetingsBooked: t.booked,
-                                 latest: t.latest, latestThread: t.latestThread)
+                                 latest: t.latest, latestThread: t.latestThread, summaryAt: summaryAt[k])
             }.sorted { $0.score != $1.score ? $0.score > $1.score : $0.key < $1.key }
             return (identity, list)
         }
+    }
+
+    static let emailPattern = try! NSRegularExpression(pattern: #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#)
+
+    /// Every address in a piece of text, like a meeting's stored guest list.
+    static func emails(in text: String) -> [String] {
+        emailPattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { Range($0.range, in: text).map { text[$0].lowercased() } }
     }
 
     // MARK: evidence
@@ -275,19 +363,35 @@ public final class Deals: Sendable {
         try await db.pool.read { db in
             let (clause, args) = Self.matchSQL(c.key)
             let msgs = try MailMessage.fetchAll(db, sql: """
-                SELECT * FROM message WHERE \(clause) AND date >= ? AND date <= ? AND labelIds NOT LIKE '%|DRAFT|%' AND labelIds NOT LIKE '%|SPAM|%'
-                ORDER BY date DESC LIMIT 8
+                SELECT * FROM message WHERE \(clause) AND date >= ? AND date <= ? AND labelIds NOT LIKE '%|DRAFT|%' AND labelIds NOT LIKE '%|SPAM|%' AND labelIds NOT LIKE '%|TRASH|%'
+                ORDER BY date DESC LIMIT 14
                 """, arguments: StatementArguments(args + [now.addingTimeInterval(-120 * 86400), now])).reversed()
             var used = Set<String>()
-            let mails = msgs.compactMap { m -> Evidence.Mail? in
+            var mails = try msgs.compactMap { m -> Evidence.Mail? in
                 let fromUser = m.labels.contains(GmailLabel.sent) || identity.isMe(m.fromEmail)
-                if fromUser { used.insert(m.fromEmail.lowercased()) }
-                else {
+                if fromUser {
+                    if Self.isAutoReply(m.subject) { return nil }
+                    used.insert(m.fromEmail.lowercased())
+                } else {
                     if Self.isAutomaticSubject(m.subject) { return nil }
                     for e in Self.recipientsOf(m) where identity.isMe(e) { used.insert(e) }
                 }
                 let who = fromUser ? "USER" : (m.fromName.isEmpty ? m.fromEmail : "\(m.fromName) <\(m.fromEmail)>")
-                return Evidence.Mail(fromUser: fromUser, from: who, date: m.date, subject: m.subject, text: String(Self.newText(m.bodyText).prefix(700)))
+                let files = try String.fetchAll(db, sql: """
+                    SELECT filename FROM attachment WHERE accountId = ? AND messageId = ? AND filename != ''
+                    AND NOT (contentId IS NOT NULL AND mimeType LIKE 'image/%') ORDER BY partId LIMIT 6
+                    """, arguments: [m.accountId, m.messageId])
+                return Evidence.Mail(fromUser: fromUser, from: who, date: m.date, subject: m.subject, text: Self.newText(m.bodyText), attachments: files)
+            }
+            // Calendar answers and out-of-office replies are gone by now: the eight newest real mails stay.
+            mails = Array(mails.suffix(8))
+            // The newest mails are where requests get answered, so those go whole; older ones only set the scene.
+            for i in mails.indices {
+                let m = mails[i]
+                let limit = i >= mails.count - Self.fullMails ? Self.fullLength : Self.shortLength
+                guard m.text.count > limit else { continue }
+                mails[i] = Evidence.Mail(fromUser: m.fromUser, from: m.from, date: m.date, subject: m.subject, text: String(m.text.prefix(limit)),
+                                         attachments: m.attachments, cut: true)
             }
             let pattern = c.key.contains("@") ? "%\(c.key)%" : "%@\(c.key)%"
             let meetingRows = try MeetingRecord.fetchAll(db, sql: "SELECT * FROM meeting WHERE lower(attendeesJSON) LIKE ? AND startedAt >= ? ORDER BY startedAt DESC LIMIT 4",

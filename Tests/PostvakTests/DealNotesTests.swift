@@ -151,14 +151,14 @@ extension DealsTests {
         let deals = Deals(db: e.db)
         let analyzer = DealAnalyzer(deals: deals, claude: ClaudeClient(session: MockServer.session) { "k" }, db: e.db)
         try await analyzer.run()
-        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 1)
+        XCTAssertEqual(MockServer.recorded("/v1/messages").count, 2, "One request per company")
         XCTAssertEqual(try await analyzer.run(), 0, "Nothing new")
 
         let notes = DealNotes(db: e.db)
         try await notes.add("Lost on 6 Oct, they built it themselves", to: "acme.be", now: Date().addingTimeInterval(5))
         try await notes.update("acme.be") { $0.doneStep = "Send Jan the offer"; $0.doneAt = Date(); $0.crmContext = "Stage in Brightly CRM: Closed Lost." }
         XCTAssertEqual(try await analyzer.run(), 1, "A note newer than the last reading makes just that deal stale")
-        let body = try JSONSerialization.jsonObject(with: MockServer.recorded("/v1/messages")[1].body) as! [String: Any]
+        let body = try JSONSerialization.jsonObject(with: MockServer.recorded("/v1/messages")[2].body) as! [String: Any]
         let user = ((body["messages"] as? [[String: Any]])?.first?["content"] as? String) ?? ""
         XCTAssertTrue(user.contains("THE USER'S OWN NOTES"))
         XCTAssertTrue(user.contains("they built it themselves"))
@@ -168,7 +168,7 @@ extension DealsTests {
         let system = (body["system"] as? String) ?? String(describing: body["system"] ?? "")
         XCTAssertTrue(system.contains("override"), "Claude is told notes override the material")
 
-        // Asked for one deal by key: read now, whatever its state, without touching the six-hourly clock.
+        // Asked for one deal by key: read now, whatever its state, without touching the clock of the regular runs.
         let last = e.db.setting("deals.lastRun")
         XCTAssertEqual(try await analyzer.run(keys: ["beta.be"]), 1)
         XCTAssertEqual(e.db.setting("deals.lastRun"), last)

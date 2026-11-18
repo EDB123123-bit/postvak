@@ -65,18 +65,21 @@ struct RichTextEditor: NSViewRepresentable {
     var onFiles: ([URL]) -> Void = { _ in }
     /// The formatting bar above the text.
     var formatting: ComposerFormatting?
+    /// Tagging people with "@".
+    var mentions: ComposerMentions?
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: RichTextEditor
         init(_ p: RichTextEditor) { parent = p }
         func textDidChange(_ n: Notification) {
             if let v = n.object as? NSTextView { parent.text = v.attributedString() }
-            MainActor.assumeIsolated { parent.formatting?.refresh() }
+            MainActor.assumeIsolated { parent.formatting?.refresh(); parent.mentions?.refresh() }
         }
         func textViewDidChangeSelection(_ n: Notification) {
-            MainActor.assumeIsolated { parent.formatting?.refresh() }
+            MainActor.assumeIsolated { parent.formatting?.refresh(); parent.mentions?.refresh() }
         }
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if MainActor.assumeIsolated({ parent.mentions?.handle(selector) ?? false }) { return true }
             guard selector == #selector(NSResponder.insertNewline(_:)), let v = textView as? ComposerTextView else { return false }
             return MainActor.assumeIsolated { v.continueList() }
         }
@@ -98,6 +101,7 @@ struct RichTextEditor: NSViewRepresentable {
         scroll.documentView = v
         v.onFiles = onFiles
         formatting?.textView = v
+        mentions?.textView = v
         v.isRichText = true
         v.allowsUndo = true
         v.usesFontPanel = true
@@ -129,6 +133,7 @@ struct ComposerView: View {
     @State private var pickingReminderDate = false
     @State private var reminderDate = FollowUps.workingDays(3, after: Date())
     @StateObject private var formatting = ComposerFormatting()
+    @StateObject private var mentions = ComposerMentions()
     @State private var showLater = false
     @State private var laterDate = Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: Date().addingTimeInterval(86400))!
     @State private var signature = ""
@@ -182,7 +187,10 @@ struct ComposerView: View {
             .padding([.horizontal, .top], 14)
 
             FormattingBar(f: formatting)
-            RichTextEditor(text: $draft.state.body, onFiles: { $0.forEach(add) }, formatting: formatting).frame(minHeight: 140)
+            RichTextEditor(text: $draft.state.body, onFiles: { $0.forEach(add) }, formatting: formatting, mentions: mentions)
+                .frame(minHeight: 140)
+                .overlay { MentionList(m: mentions) }
+                .zIndex(1)
 
             if let b = draft.state.booking {
                 HStack(alignment: .top, spacing: 8) {
@@ -274,6 +282,7 @@ struct ComposerView: View {
             .padding(12)
             .onAppear { if let at = draft.state.scheduledAt, at > Date() { laterDate = at } }
         }
+        .onAppear(perform: setUpMentions)
         // Its own window now, so it may shrink to sit beside the inbox.
         .frame(minWidth: 560, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -391,6 +400,17 @@ struct ComposerView: View {
             }
         }
         .padding(14).frame(width: 320)
+    }
+
+    /// Who "@" can tag, and putting a tagged person on the mail.
+    private func setUpMentions() {
+        let draft = draft, model = model
+        mentions.onMail = { GmailParser.splitAddresses([draft.state.to, draft.state.cc, draft.state.bcc].joined(separator: ",")) }
+        mentions.contacts = { (try? await model.engine.mail.contacts(matching: $0)) ?? [] }
+        mentions.own = { Set(model.accounts.map { $0.email.lowercased() } + [draft.state.fromEmail?.lowercased()].compactMap { $0 }) }
+        mentions.onTag = { r in
+            if let to = Mentions.to(adding: r, to: draft.state.to, cc: draft.state.cc, bcc: draft.state.bcc) { draft.state.to = to }
+        }
     }
 
     private func add(_ url: URL) {
