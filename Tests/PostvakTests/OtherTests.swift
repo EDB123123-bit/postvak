@@ -534,7 +534,7 @@ import GRDB
         let l = await s.handle(req(["jsonrpc": "2.0", "id": 2, "method": "tools/list"]))
         let tools = ((try JSONSerialization.jsonObject(with: l.body) as! [String: Any])["result"] as! [String: Any])["tools"] as! [[String: Any]]
         let names = Set(tools.map { $0["name"] as! String })
-        for expected in ["list_accounts", "search_mail", "get_thread", "get_attachment", "create_draft", "send_mail", "reply", "list_scheduled", "archive", "label", "mark_read", "snooze", "get_signature", "set_signature", "get_out_of_office", "set_out_of_office",
+        for expected in ["list_accounts", "search_mail", "get_thread", "get_attachment", "create_draft", "send_mail", "reply", "list_scheduled", "archive", "label", "mark_read", "snooze", "get_signature", "set_signature", "get_writing_style", "get_out_of_office", "set_out_of_office",
                          "list_calendars", "list_events", "get_availability", "create_event", "update_event", "delete_event", "respond_to_invite",
                          "list_meetings", "get_meeting", "get_transcript", "search_transcripts", "start_recording", "stop_recording"] {
             XCTAssertTrue(names.contains(expected), expected)

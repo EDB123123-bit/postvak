@@ -247,7 +247,7 @@ struct AIPane: View {
         Form {
             Section("Anthropic API") {
                 SecretField(title: "API key", key: SecretKey.anthropicKey)
-                Text("Postvak uses \(ClaudeClient.model) for inbox sorting, meeting summaries, Ask, the check before sending, mail follow-up drafts and the follow-up review, prep briefs and deals. Meeting follow-up mails use \(MeetingFollowUpWriter.model).").font(.caption).foregroundStyle(.secondary)
+                Text("Postvak uses \(ClaudeClient.model) for inbox sorting, meeting summaries, Ask, the check before sending, mail follow-up drafts and the follow-up review, prep briefs and deals. Meeting follow-up mails and building your writing style use \(MeetingFollowUpWriter.model).").font(.caption).foregroundStyle(.secondary)
             }
             Section("Usage") { AIUsageView() }
             Section("Smart inbox") {
@@ -267,12 +267,81 @@ struct AIPane: View {
                 .onChange(of: followUps) { _, v in try? model.engine.db.setSetting(FollowUpReview.settingKey, v.rawValue) }
                 Text("At 8:15, after mail scheduled for 8:00 went out, Postvak looks at the last two weeks for threads where someone waits on you or your mail got no answer, and business meetings nobody wrote to since. It skips anything you already followed up from any account, or queued. For each, it sends the thread to Anthropic, which decides whether a follow-up is worth it and writes it, at most ten per run. The drafts wait under Mail → Review Drafts: nothing is sent until you approve.").font(.caption).foregroundStyle(.secondary)
             }
+            WritingStyleSection()
         }
         .formStyle(.grouped)
         .onAppear {
             classify = model.engine.db.settingBool("ai.classify", default: true)
             deals = model.engine.db.settingBool("ai.deals", default: true)
             followUps = model.draftReview.frequency
+        }
+    }
+}
+
+/// The user's writing style, which every draft Postvak writes follows. Built once from their sent mail, editable here,
+/// kept in their own data folder only.
+struct WritingStyleSection: View {
+    @EnvironmentObject var model: AppModel
+    @State private var text = ""
+    @State private var saved = ""
+    @State private var building = false
+    @State private var confirmDelete = false
+
+    var store: WritingStyle { WritingStyle(paths: model.engine.paths) }
+
+    var body: some View {
+        Section("Writing style") {
+            TextEditor(text: $text)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 180)
+                .overlay(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("No writing style yet. Build one from your sent mail, or paste your own.")
+                            .foregroundStyle(.secondary).padding(6).allowsHitTesting(false)
+                    }
+                }
+            HStack {
+                Button(building ? "Building…" : (saved.isEmpty ? "Build from my sent mail" : "Rebuild from my sent mail")) { build() }
+                    .disabled(building || !model.claude.hasKey)
+                Button("Save") { save() }.disabled(text == saved)
+                Spacer()
+                Button("Delete", role: .destructive) { confirmDelete = true }.disabled(saved.isEmpty && text.isEmpty)
+            }
+            Text("Every draft Postvak writes (follow-up reminders, the follow-up review, meeting follow-ups, and drafts Claude makes through the Claude connection) follows this description and up to five of your own past mails, chosen to be to the same people or in the same language. Building it sends your 80 most recent sent mails (only your own text, without quoted replies) to Anthropic once, about $0.10. The result stays on this Mac, in writing-style.md in Postvak's data folder; edit it freely. Delete removes it.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { saved = store.load(); text = saved }
+        .confirmationDialog("Delete your writing style?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) {
+                do { try store.delete(); saved = ""; text = ""; model.toast("Writing style deleted.") }
+                catch { model.toast(error.localizedDescription, kind: .error) }
+            }
+        } message: { Text("Drafts then learn your tone from your past mails alone. You can build it again at any time.") }
+    }
+
+    private func save() {
+        do { try store.save(text); saved = store.load(); text = saved; model.toast("Writing style saved.") }
+        catch { model.toast(error.localizedDescription, kind: .error) }
+    }
+
+    private func build() {
+        building = true
+        Task { @MainActor in
+            defer { building = false }
+            do {
+                let accounts = try await model.engine.mail.accounts().map(\.id)
+                let samples = try await model.engine.db.pool.read { db in try StyleExamples.forProfile(db, accountIds: accounts) }
+                guard samples.count >= WritingStyleBuilder.minimumSamples else {
+                    model.toast("Postvak needs at least \(WritingStyleBuilder.minimumSamples) sent mails to learn from. Let it sync first.", kind: .error)
+                    return
+                }
+                let profile = try await WritingStyleBuilder(claude: model.claude).build(samples: samples)
+                try store.save(profile)
+                saved = store.load(); text = saved
+                model.toast("Writing style built from \(samples.count) sent mails. Read it through and adjust what's off.")
+            } catch {
+                model.toast(error.localizedDescription, kind: .error)
+            }
         }
     }
 }

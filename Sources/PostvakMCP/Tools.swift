@@ -193,7 +193,7 @@ public enum PostvakTools {
                 let url = try await e.mail.attachmentFile(rec)
                 return ["path": url.path, "mime_type": rec.mimeType, "size": rec.size] as [String: Any]
             },
-            MCPTool(name: "create_draft", description: "Save a Gmail draft. Nothing is sent: the user approves, edits or deletes it in Postvak's Review Drafts. Pass reply_to_message_id to thread it, and draft_id to replace an earlier draft. The sender is picked from the mail's project unless `from` says otherwise; the result tells which account holds the draft and which address it is from.",
+            MCPTool(name: "create_draft", description: "Save a Gmail draft. Write it in the user's style: call get_writing_style first. Nothing is sent: the user approves, edits or deletes it in Postvak's Review Drafts. Pass reply_to_message_id to thread it, and draft_id to replace an earlier draft. The sender is picked from the mail's project unless `from` says otherwise; the result tells which account holds the draft and which address it is from.",
                     properties: [
                         "account": str("Account to keep the draft in. A reply is always kept in the account that holds the message it answers."),
                         "from": str(fromDescription),
@@ -315,6 +315,21 @@ public enum PostvakTools {
                 let until = try a.needDate("until")
                 try await e.mail.snooze(accountId: try a.need("account"), threadId: try a.need("thread_id"), until: until)
                 return ["thread_id": try a.need("thread_id"), "until": Fmt.string(until)]
+            },
+            MCPTool(name: "get_writing_style", description: "How the user writes email: their writing style (greetings, closings, tone and phrases per language) and a few of their own past emails to the same people or in the same language. Call it before writing any email or draft as the user, and write like it: same greeting, closing, register and length. The style may be empty if the user has not made one yet.",
+                    properties: ["account": str("Account the mail goes out from. Leave out for the first account."),
+                                 "to": strs("Who the mail goes to, so the examples are mails the user sent them before."),
+                                 "language": str("The mail's language when known: nl, fr or en."),
+                                 "about": str("The mail being answered, to pick examples in its language.")]) { raw in
+                let a = Args(raw: raw)
+                var account = a.string("account")
+                if account == nil { account = try await e.mail.accounts().first?.id }
+                guard let acct = account else { throw ArgError(message: "No account in Postvak yet.") }
+                let to = a.strings("to"), language = a.string("language"), about = a.string("about") ?? ""
+                let examples = try await e.db.pool.read { db in
+                    try StyleExamples.pick(db, accountId: acct, recipients: to, about: about, language: language)
+                }
+                return ["account": acct, "writing_style": WritingStyle(paths: e.paths).load(), "past_emails": examples] as [String: Any]
             },
             MCPTool(name: "get_signature", description: "Read an account's Gmail signature (HTML).",
                     properties: ["account": str("Account address.")], required: ["account"]) { raw in

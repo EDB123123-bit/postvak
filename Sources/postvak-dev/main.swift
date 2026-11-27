@@ -132,14 +132,14 @@ case "follow-up":
     guard let (m, summary) = try await engine.meetings.get(args[1]) else { print("No such meeting"); exit(1) }
     let (people, account) = try await engine.db.pool.read { (try MeetingFollowUp.addressees(m, $0), try MeetingFollowUp.account(m, $0)) }
     let samples = try await engine.db.pool.read { db in
-        try MailMessage.filter(Column("accountId") == (account ?? "") && Column("labelIds").like("%|SENT|%") && !Column("labelIds").like("%|DRAFT|%"))
-            .order(Column("date").desc).limit(5).fetchAll(db)
-    }.map { FollowUpWriter.ownText($0.bodyText) }.filter { !$0.isEmpty }
+        try StyleExamples.pick(db, accountId: account ?? "", recipients: people.to + people.cc, language: m.language)
+    }
     let out = try await MeetingFollowUpWriter(claude: claude).write(
         meeting: m, summary: summary, segments: try await engine.meetings.segments(meetingId: m.id),
         names: try await engine.meetings.speakerNames(meetingId: m.id),
         hints: try await engine.meetings.speakers(meetingId: m.id).filter { $0.source == .suggested }.reduce(into: [:]) { $0[$1.label] = $1.name }, me: try await engine.meetings.speakerCandidates(meetingId: m.id).first?.name,
-        recipients: people.to, cc: people.cc, lastInThread: nil, samples: samples)
+        recipients: people.to, cc: people.cc, lastInThread: nil, samples: samples,
+        style: WritingStyle(paths: engine.paths).load())
     print("From:", account ?? "-", "\nTo:", people.to.joined(separator: ", "), "\nCc:", people.cc.joined(separator: ", "))
     print("Subject:", out.subject, "\n\n" + out.text)
     print("\n(\(out.text.split(whereSeparator: \.isWhitespace).count) words)")

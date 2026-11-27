@@ -59,7 +59,7 @@ A plain executable target, because `swift test` does not run Swift Testing witho
 
 Postvak is built for one person's own Mac. Each user brings their own Google Cloud project and their own API keys: nothing of the author's is in the code or the repository.
 
-**Where your data lives.** Everything is in `~/Library/Application Support/Postvak`: the SQLite database with mail, calendar and transcripts, downloaded attachments, meeting recordings and the transcription models. Postvak does not encrypt it itself; FileVault protects it at rest, and Time Machine backs it up along with the rest of your home folder. Removing an account in Settings deletes its local mail and its saved sign-in; the folder can be deleted to remove everything.
+**Where your data lives.** Everything is in `~/Library/Application Support/Postvak`: the SQLite database with mail, calendar and transcripts, downloaded attachments, meeting recordings, the transcription models and your writing style (`writing-style.md`, which you can read, edit or delete in Settings → AI). Postvak does not encrypt it itself; FileVault protects it at rest, and Time Machine backs it up along with the rest of your home folder. Removing an account in Settings deletes its local mail and its saved sign-in; the folder can be deleted to remove everything.
 
 **Secrets.** Your Google client ID and secret, the refresh token of each account, the Anthropic key, the optional Deepgram key and the MCP token live in the macOS Keychain under the service `be.postvak.app`. Nothing is written to files or settings, and nothing is logged. Google access tokens are kept in memory only.
 
@@ -68,7 +68,7 @@ Postvak is built for one person's own Mac. Each user brings their own Google Clo
 | Destination | When | What |
 |---|---|---|
 | Google (Gmail and Calendar APIs) | While running | Your mail and calendar, through your own OAuth client |
-| Anthropic (Claude API) | Only with your API key | Inbox sorting: sender, subject and 300 characters of threads Gmail's categories miss. Meeting summaries, Ask, follow-up drafts, prep briefs and deals: the transcripts, mail and notes those features read. The send check: the draft and its thread. Each pane in Settings → AI says what its feature sends, and can be switched off |
+| Anthropic (Claude API) | Only with your API key | Inbox sorting: sender, subject and 300 characters of threads Gmail's categories miss. Meeting summaries, Ask, follow-up drafts, prep briefs and deals: the transcripts, mail and notes those features read. The send check: the draft and its thread. Building your writing style: your 80 most recent sent mails, once, only your own text. Each pane in Settings → AI says what its feature sends, and can be switched off |
 | Hugging Face | First meeting transcribed locally | Downloads the WhisperKit and speaker models, about 650 MB. No data of yours goes out |
 | Deepgram | Only for a meeting where you choose cloud transcription | That meeting's audio |
 | cal.com | Only when you insert a booking card | Your public cal.com username and the dates asked for; no key is needed |
