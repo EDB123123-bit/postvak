@@ -71,7 +71,8 @@ public final class MeetingFollowUpWriter: Sendable {
     You write the follow-up email after a meeting, as the user who took part in it, to the guests. You return it in parts.
     The user's colleagues who took part are in CC: never greet or thank them, and name them by first name when they did or
     promised something ("Igor will send you…"). Take their names from the CC line: never write "our colleague".
-    Write in the language given, with the greeting and tone the user uses in their other emails. Plain text, no markdown.
+    Write in the language given, in the user's own style: follow THE USER'S WRITING STYLE when given, and use the greeting,
+    closing, tone and wording of their past emails. Plain text, no markdown.
     Base everything on the transcript when there is one; the summary only helps, and where they disagree the transcript is
     right. Transcripts contain transcription errors: correct obvious ones (names of people, companies, products and places,
     such as Kent for Gent) and never repeat a garbled word.
@@ -171,7 +172,7 @@ public final class MeetingFollowUpWriter: Sendable {
     }
 
     static func prompt(meeting: MeetingRecord, summary: MeetingSummaryRecord?, invite: String? = nil, transcript: String = "", notes: String = "",
-                       names: [String: String] = [:], hints: [String: String] = [:], voices: [String: Int] = [:], me: String?, recipients: [String], cc: [String] = [], lastInThread: MailMessage?, samples: [String]) -> String {
+                       names: [String: String] = [:], hints: [String: String] = [:], voices: [String: Int] = [:], me: String?, recipients: [String], cc: [String] = [], lastInThread: MailMessage?, samples: [String], style: String = "") -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "d MMM yyyy"
@@ -187,7 +188,7 @@ public final class MeetingFollowUpWriter: Sendable {
         guard let summary else {
             s += "NO RECORDING: nothing is known about what was said.\n"
             if let invite, !invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { s += "Invitation: \(invite.prefix(1500))\n" }
-            return s + tail(lastInThread: lastInThread, samples: samples)
+            return s + tail(lastInThread: lastInThread, samples: samples, style: style)
         }
         s += "Summary: \(summary.summary.prefix(2500))\n"
         let decisions = summary.decisions
@@ -201,30 +202,26 @@ public final class MeetingFollowUpWriter: Sendable {
         let open = summary.openQuestions
         if !open.isEmpty { s += "Open questions:\n" + open.map { "- \($0)\n" }.joined() }
         if !transcript.isEmpty { s += "\nTRANSCRIPT\n\(transcript)\n" }
-        return s + tail(lastInThread: lastInThread, samples: samples)
+        return s + tail(lastInThread: lastInThread, samples: samples, style: style)
     }
 
-    static func tail(lastInThread: MailMessage?, samples: [String]) -> String {
+    static func tail(lastInThread: MailMessage?, samples: [String], style: String = "") -> String {
         var s = ""
         if let m = lastInThread {
             s += "\nTHE LAST EMAIL IN THE THREAD THIS REPLIES TO\nFrom: \(m.senderDisplay)\nSubject: \(m.subject)\n\(FollowUpWriter.ownText(m.bodyText).prefix(1500))\n"
         }
-        if !samples.isEmpty {
-            s += "\nOTHER EMAILS BY THE USER, FOR TONE ONLY\n"
-            for x in samples { s += "---\n\(x.prefix(600))\n" }
-        }
-        return s
+        return s + StylePrompt.block(style: style, samples: samples)
     }
 
     /// Without a summary (the meeting wasn't recorded) it writes a short thank-you from the title and `invite` only.
     public func write(meeting: MeetingRecord, summary: MeetingSummaryRecord?, invite: String? = nil,
                       segments: [TranscriptSegmentRecord] = [], notes: String = "", names: [String: String] = [:], hints: [String: String] = [:], me: String?,
-                      recipients: [String], cc: [String] = [], lastInThread: MailMessage?, samples: [String]) async throws -> Output {
+                      recipients: [String], cc: [String] = [], lastInThread: MailMessage?, samples: [String], style: String = "") async throws -> Output {
         let out = try await claude.structured(system: Self.system,
                                               user: Self.prompt(meeting: meeting, summary: summary, invite: invite,
                                                                 transcript: Self.transcript(segments, names: names), notes: notes, names: names, hints: hints,
                                                                 voices: segments.filter { names[$0.speaker] == nil }.reduce(into: [:]) { $0[$1.speaker, default: 0] += 1 }, me: me,
-                                                                recipients: recipients, cc: cc, lastInThread: lastInThread, samples: samples),
+                                                                recipients: recipients, cc: cc, lastInThread: lastInThread, samples: samples, style: style),
                                               schema: Self.schema, effort: "medium", maxTokens: 16000, as: Parts.self, feature: "Meeting follow-ups", orderedFields: true, model: Self.model)
         return Output(subject: out.subject.trimmed, text: Self.assemble(out))
     }

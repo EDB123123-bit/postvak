@@ -83,11 +83,14 @@ final class DraftReview: ObservableObject {
     private func draft(_ c: FollowUpCandidate, now: Date) async throws -> Bool {
         let mail = model.engine.mail, last = c.last
         let detail = try await mail.detail(accountId: last.accountId, threadId: last.threadId)
+        // The people in the thread other than the user: the examples are mails the user sent them before.
+        let people = GmailParser.splitAddresses([last.fromEmail, last.toLine, last.ccLine].joined(separator: ","))
+            .filter { GmailParser.parseAddress($0).email.lowercased() != last.accountId.lowercased() }
         let samples = try await model.engine.db.pool.read { db in
-            try MailMessage.filter(Column("accountId") == last.accountId && Column("labelIds").like("%|SENT|%") && !Column("labelIds").like("%|DRAFT|%"))
-                .order(Column("date").desc).limit(5).fetchAll(db)
-        }.map { FollowUpWriter.ownText($0.bodyText) }.filter { !$0.isEmpty }
-        let out = try await writer.review(c, thread: detail.messages, samples: samples, now: now)
+            try StyleExamples.pick(db, accountId: last.accountId, recipients: people, about: last.bodyText, excludingThread: last.threadId)
+        }
+        let out = try await writer.review(c, thread: detail.messages, samples: samples,
+                                          style: WritingStyle(paths: model.engine.paths).load(), now: now)
         guard out.needed, !out.text.isEmpty else { return false }
         let addr = try await mail.replyAddressing(accountId: last.accountId, messageId: last.messageId, replyAll: true)
         let sender = await mail.chooseSender(accountId: last.accountId, recipients: addr.to + addr.cc, isReply: true)

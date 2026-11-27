@@ -429,11 +429,11 @@ final class AppModel: NSObject, ObservableObject {
                 let d = try await mail.detail(accountId: f.accountId, threadId: f.threadId)
                 guard let sent = d.messages.first(where: { $0.messageId == f.id }) ?? d.messages.last(where: { !$0.isDraft }) else { continue }
                 let samples = try await pool.read { db in
-                    try MailMessage.filter(Column("accountId") == f.accountId && Column("threadId") != f.threadId
-                                           && Column("labelIds").like("%|SENT|%") && !Column("labelIds").like("%|DRAFT|%"))
-                        .order(Column("date").desc).limit(5).fetchAll(db)
-                }.map { FollowUpWriter.ownText($0.bodyText) }.filter { !$0.isEmpty }
-                let text = try await followUpWriter.nudge(sent: sent, thread: d.messages.filter { !$0.isDraft }, samples: samples)
+                    try StyleExamples.pick(db, accountId: f.accountId, recipients: GmailParser.splitAddresses(sent.toLine + "," + sent.ccLine),
+                                           about: sent.bodyText, excludingThread: f.threadId)
+                }
+                let text = try await followUpWriter.nudge(sent: sent, thread: d.messages.filter { !$0.isDraft }, samples: samples,
+                                                          style: WritingStyle(paths: engine.paths).load())
                 let lower = sent.subject.lowercased()
                 var input = ComposeInput(accountId: f.accountId, to: GmailParser.splitAddresses(sent.toLine), cc: GmailParser.splitAddresses(sent.ccLine),
                                          subject: lower.hasPrefix("re:") ? sent.subject : "Re: \(sent.subject)", text: text)
@@ -544,10 +544,11 @@ final class AppModel: NSObject, ObservableObject {
             let d = try await mail.detail(accountId: thread.accountId, threadId: thread.threadId)
             last = d.messages.first { $0.messageId == thread.lastMessageId } ?? d.messages.last { !$0.isDraft }
         }
+        let about = last?.bodyText ?? "", language = m.language, threadId = thread?.threadId
         let samples = try await engine.db.pool.read { db in
-            try MailMessage.filter(Column("accountId") == accountId && Column("labelIds").like("%|SENT|%") && !Column("labelIds").like("%|DRAFT|%"))
-                .order(Column("date").desc).limit(5).fetchAll(db)
-        }.map { FollowUpWriter.ownText($0.bodyText) }.filter { !$0.isEmpty }
+            try StyleExamples.pick(db, accountId: accountId, recipients: people.to + people.cc, about: about,
+                                   language: language, excludingThread: threadId)
+        }
         let me = try await store.speakerCandidates(meetingId: m.id).first?.name
         // A meeting made from a calendar event alone has no transcript; these come back empty.
         let segments = try await store.segments(meetingId: m.id)
@@ -557,7 +558,8 @@ final class AppModel: NSObject, ObservableObject {
         let hints = speakers.filter { $0.source == .suggested }.reduce(into: [String: String]()) { $0[$1.label] = $1.name }
         let notes = try await store.note(meetingId: m.id)
         let out = try await meetingFollowUpWriter.write(meeting: m, summary: summary, invite: invite, segments: segments, notes: notes, names: names, hints: hints,
-                                                        me: me, recipients: people.to, cc: people.cc, lastInThread: last, samples: samples)
+                                                        me: me, recipients: people.to, cc: people.cc, lastInThread: last, samples: samples,
+                                                        style: WritingStyle(paths: engine.paths).load())
         var subject = out.subject
         if let last { subject = last.subject.lowercased().hasPrefix("re:") ? last.subject : "Re: \(last.subject)" }
         var input = ComposeInput(accountId: accountId, to: people.to, cc: people.cc, subject: subject, text: out.text)
